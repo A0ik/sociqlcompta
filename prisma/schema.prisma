@@ -1,0 +1,136 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model User {
+  id                 String     @id @default(cuid())
+  name               String?
+  email              String?    @unique
+  emailVerified      DateTime?
+  password           String?
+  image              String?
+  subscriptionStatus String     @default("inactive")
+  subscriptionId     String?
+  createdAt          DateTime   @default(now())
+  accounts           Account[]
+  sessions           Session[]
+  company            Company?
+  clients            Client[]
+  documents          Document[]
+}
+
+model Company {
+  id              String  @id @default(cuid())
+  userId          String  @unique
+  user            User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  nom             String
+  adresse         String?
+  siret           String?
+  email           String?
+  telephone       String?
+  stripeSecretKey String?
+}
+
+model Client {
+  id            String     @id @default(cuid())
+  userId        String
+  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  numDossier    String
+  raisonSociale String
+  adresse       String?
+  siret         String?
+  siren         String?
+  email         String?
+  telephone     String?
+  createdAt     DateTime   @default(now())
+  documents     Document[]
+
+  @@unique([userId, numDossier])
+  @@index([userId])
+}
+
+model Document {
+  id                String   @id @default(cuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type              String
+  numero            Int
+  numeroComplet     String
+  sousTotal         Float
+  reduction         Float    @default(0)
+  montantHT         Float
+  tauxTVA           Float    @default(20)
+  montantTVA        Float
+  montantTTC        Float
+  stripePaymentLink String?
+  statut            String   @default("EN_ATTENTE")
+  clientId          String
+  client            Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  lignes            Ligne[]
+  createdAt         DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Ligne {
+  id           String   @id @default(cuid())
+  description  String
+  quantite     Int      @default(1)
+  prixUnitaire Float
+  montant      Float
+  documentId   String
+  document     Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+}
+
+model Sequence {
+  id     String @id
+  numero Int    @default(0)
+}
+
+model Contact {
+  id        String   @id @default(cuid())
+  nom       String
+  email     String
+  message   String
+  createdAt DateTime @default(now())
+}
