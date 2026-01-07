@@ -4,7 +4,8 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { 
   Mic, MicOff, Plus, Search, Link, FileText, RefreshCw, 
   Trash2, Check, X, Building2, CreditCard, Receipt,
-  ChevronRight, ExternalLink, Upload
+  ChevronRight, ExternalLink, Upload, FileSpreadsheet,
+  Copy, Phone, Mail, MapPin
 } from 'lucide-react';
 
 // Types
@@ -25,7 +26,7 @@ interface Client {
 
 interface Document {
   id: string;
-  type: 'FACTURE' | 'AVOIR';
+  type: 'FACTURE' | 'AVOIR' | 'DEVIS';
   numeroComplet: string;
   date: string;
   lignes: Ligne[];
@@ -40,11 +41,21 @@ interface Document {
 
 // Formatage
 const fmt = (n: number) => new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' }).format(n);
+const fmtDate = (d: string) => new Intl.DateTimeFormat('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' }).format(new Date(d));
+
+// Config entreprise (à personnaliser)
+const ENTREPRISE = {
+  nom: "Live & Best Consulting",
+  adresse: "19 AVENUE JEAN MOULIN, 93100 MONTREUIL",
+  siret: "805 360 963 00021",
+  telephone: "06 58 67 06 46",
+  email: "Liveandbest@gmail.com"
+};
 
 export default function Home() {
   // États principaux
   const [mode, setMode] = useState<'select' | 'create'>('select');
-  const [docType, setDocType] = useState<'FACTURE' | 'AVOIR'>('FACTURE');
+  const [docType, setDocType] = useState<'FACTURE' | 'AVOIR' | 'DEVIS'>('FACTURE');
   const [selectedClient, setSelectedClient] = useState<Client | null>(null);
   const [clients, setClients] = useState<Client[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -52,98 +63,200 @@ export default function Home() {
   // États lignes
   const [lignes, setLignes] = useState<Ligne[]>([]);
   const [reduction, setReduction] = useState(0);
+  const [texteManuel, setTexteManuel] = useState('');
   
-  // États audio
+  // États audio - AMÉLIORÉ
   const [isRecording, setIsRecording] = useState(false);
+  const [audioStatus, setAudioStatus] = useState('');
   const [transcriptions, setTranscriptions] = useState<string[]>([]);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
   
   // États UI
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
   const [createdDoc, setCreatedDoc] = useState<Document | null>(null);
   
   // Modal ajout client
   const [showAddClient, setShowAddClient] = useState(false);
   const [urlInput, setUrlInput] = useState('');
-  const [manualClient, setManualClient] = useState({ numDossier: '', raisonSociale: '', siret: '' });
+  const [manualClient, setManualClient] = useState({ numDossier: '', raisonSociale: '', siret: '', adresse: '' });
 
   // Charger les clients
   const loadClients = useCallback(async () => {
-    const res = await fetch(`/api/dossiers?search=${searchQuery}`);
-    const data = await res.json();
-    setClients(data.clients || []);
+    try {
+      const res = await fetch(`/api/dossiers?search=${encodeURIComponent(searchQuery)}`);
+      const data = await res.json();
+      setClients(data.clients || []);
+    } catch (e) {
+      console.error(e);
+    }
   }, [searchQuery]);
 
   useEffect(() => {
     loadClients();
   }, [loadClients]);
 
-  // Enregistrement audio
+  // Debounce recherche
+  useEffect(() => {
+    const timer = setTimeout(() => loadClients(), 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery, loadClients]);
+
+  // =============== ENREGISTREMENT AUDIO AMÉLIORÉ ===============
   const startRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-      const chunks: Blob[] = [];
-
-      recorder.ondataavailable = (e) => chunks.push(e.data);
+      setError(null);
+      setAudioStatus('Accès au micro...');
+      
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: { echoCancellation: true, noiseSuppression: true } 
+      });
+      
+      setAudioStatus('🎙️ Parlez maintenant...');
+      
+      // Trouver le format supporté
+      let mimeType = 'audio/webm;codecs=opus';
+      if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'audio/webm';
+      if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'audio/mp4';
+      if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = '';
+      
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+      audioChunksRef.current = [];
+      
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+      
       recorder.onstop = async () => {
         stream.getTracks().forEach(t => t.stop());
-        const blob = new Blob(chunks, { type: 'audio/webm' });
+        
+        if (audioChunksRef.current.length === 0) {
+          setError('Aucun audio enregistré');
+          setAudioStatus('');
+          return;
+        }
+        
+        const blob = new Blob(audioChunksRef.current, { type: mimeType || 'audio/webm' });
+        
+        if (blob.size < 1000) {
+          setError('Enregistrement trop court');
+          setAudioStatus('');
+          return;
+        }
+        
         await processAudio(blob);
       };
-
-      recorder.start();
+      
+      recorder.onerror = () => {
+        setError('Erreur d\'enregistrement');
+        setIsRecording(false);
+        setAudioStatus('');
+      };
+      
+      recorder.start(1000);
       mediaRecorderRef.current = recorder;
       setIsRecording(true);
-    } catch (e) {
-      setError('Impossible d\'accéder au micro');
+      
+    } catch (err: unknown) {
+      const e = err as Error & { name?: string };
+      if (e.name === 'NotAllowedError') {
+        setError('Micro refusé. Autorisez l\'accès dans votre navigateur.');
+      } else if (e.name === 'NotFoundError') {
+        setError('Aucun microphone détecté.');
+      } else {
+        setError(`Erreur: ${e.message}`);
+      }
+      setAudioStatus('');
     }
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current) {
-      mediaRecorderRef.current.stop();
+    if (mediaRecorderRef.current?.state !== 'inactive') {
+      setAudioStatus('Traitement...');
+      mediaRecorderRef.current?.stop();
       setIsRecording(false);
     }
   };
 
   const processAudio = async (blob: Blob) => {
     setLoading(true);
-    setError(null);
-
+    setAudioStatus('Transcription en cours...');
+    
     try {
-      // Transcription
-      const form = new FormData();
-      form.append('audio', blob);
-      const transRes = await fetch('/api/generate', { method: 'POST', body: form });
-      const transData = await transRes.json();
-
-      if (!transData.success) {
-        setError(transData.error || 'Erreur transcription');
+      const formData = new FormData();
+      formData.append('audio', blob, 'recording.webm');
+      
+      const res = await fetch('/api/generate', { method: 'POST', body: formData });
+      const data = await res.json();
+      
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Erreur transcription');
+      }
+      
+      if (!data.transcription?.trim()) {
+        setError('Aucune parole détectée. Parlez plus fort.');
+        setAudioStatus('');
         setLoading(false);
         return;
       }
-
-      const newTranscription = transData.transcription;
-      setTranscriptions(prev => [...prev, newTranscription]);
-
+      
+      setTranscriptions(prev => [...prev, data.transcription]);
+      setAudioStatus('Extraction des lignes...');
+      
       // Extraction
-      const extractRes = await fetch('/api/generate', {
+      const extRes = await fetch('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'extract', texte: newTranscription }),
+        body: JSON.stringify({ action: 'extract', texte: data.transcription }),
       });
-      const extractData = await extractRes.json();
-
-      if (extractData.success && extractData.lignes?.length) {
-        setLignes(prev => [...prev, ...extractData.lignes]);
-        if (extractData.reduction) setReduction(r => r + extractData.reduction);
+      const extData = await extRes.json();
+      
+      if (extData.lignes?.length) {
+        setLignes(prev => [...prev, ...extData.lignes]);
+        if (extData.reduction) setReduction(r => r + extData.reduction);
+        setSuccess(`${extData.lignes.length} ligne(s) ajoutée(s)`);
+      } else {
+        setSuccess('Transcrit. Ajoutez les lignes manuellement.');
       }
-    } catch (e) {
-      setError(String(e));
+      
+      setTimeout(() => setSuccess(null), 3000);
+      setAudioStatus('');
+      
+    } catch (e: unknown) {
+      setError((e as Error).message || 'Erreur');
+      setAudioStatus('');
     }
+    
+    setLoading(false);
+  };
 
+  // Extraire depuis texte manuel
+  const extractFromText = async () => {
+    if (!texteManuel.trim()) return;
+    setLoading(true);
+    
+    try {
+      const res = await fetch('/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'extract', texte: texteManuel }),
+      });
+      const data = await res.json();
+      
+      if (data.lignes?.length) {
+        setLignes(prev => [...prev, ...data.lignes]);
+        setTexteManuel('');
+        setSuccess(`${data.lignes.length} ligne(s) extraite(s)`);
+        setTimeout(() => setSuccess(null), 3000);
+      } else {
+        setError('Pas de lignes extraites');
+      }
+    } catch {
+      setError('Erreur extraction');
+    }
+    
     setLoading(false);
   };
 
@@ -167,11 +280,13 @@ export default function Home() {
         setShowAddClient(false);
         setUrlInput('');
         setMode('create');
+        setSuccess('Client importé !');
+        setTimeout(() => setSuccess(null), 3000);
       } else {
         setError(data.error || 'Erreur extraction');
       }
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError('Erreur import');
     }
 
     setLoading(false);
@@ -179,7 +294,10 @@ export default function Home() {
 
   // Ajouter client manuellement
   const addClientManual = async () => {
-    if (!manualClient.numDossier || !manualClient.raisonSociale) return;
+    if (!manualClient.numDossier || !manualClient.raisonSociale) {
+      setError('Numéro et raison sociale requis');
+      return;
+    }
     setLoading(true);
 
     try {
@@ -194,13 +312,13 @@ export default function Home() {
         setClients(prev => [data.client, ...prev]);
         setSelectedClient(data.client);
         setShowAddClient(false);
-        setManualClient({ numDossier: '', raisonSociale: '', siret: '' });
+        setManualClient({ numDossier: '', raisonSociale: '', siret: '', adresse: '' });
         setMode('create');
       } else {
         setError(data.error);
       }
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError('Erreur création');
     }
 
     setLoading(false);
@@ -230,8 +348,8 @@ export default function Home() {
       } else {
         setError(data.error);
       }
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setError('Erreur création');
     }
 
     setLoading(false);
@@ -239,13 +357,14 @@ export default function Home() {
 
   // Reset
   const reset = () => {
-    setMode('select');
     setSelectedClient(null);
     setLignes([]);
     setReduction(0);
     setTranscriptions([]);
+    setTexteManuel('');
     setCreatedDoc(null);
     setError(null);
+    setMode('select');
   };
 
   // Calculs
@@ -254,11 +373,9 @@ export default function Home() {
   const montantTVA = montantHT * 0.2;
   const montantTTC = montantHT + montantTVA;
 
-  // Ajouter ligne manuelle
-  const addLigne = () => {
-    setLignes([...lignes, { description: '', quantite: 1, prixUnitaire: 0, montant: 0 }]);
-  };
-
+  // Gestion lignes
+  const addLigne = () => setLignes([...lignes, { description: '', quantite: 1, prixUnitaire: 0, montant: 0 }]);
+  
   const updateLigne = (i: number, field: string, value: string | number) => {
     const updated = [...lignes];
     const l = { ...updated[i], [field]: value };
@@ -269,359 +386,436 @@ export default function Home() {
     setLignes(updated);
   };
 
-  const removeLigne = (i: number) => {
-    setLignes(lignes.filter((_, idx) => idx !== i));
+  const removeLigne = (i: number) => setLignes(lignes.filter((_, idx) => idx !== i));
+
+  // Copier lien
+  const copyLink = (link: string) => {
+    navigator.clipboard.writeText(link);
+    setSuccess('Lien copié !');
+    setTimeout(() => setSuccess(null), 2000);
   };
 
-  // Document créé - Affichage succès
+  // =============== PRÉVISUALISATION DOCUMENT PRO ===============
   if (createdDoc) {
     return (
-      <div className="min-h-screen bg-black text-white p-8">
-        <div className="max-w-2xl mx-auto">
-          <div className="text-center mb-8">
-            <div className="w-20 h-20 bg-green-500 rounded-full flex items-center justify-center mx-auto mb-4">
-              <Check className="w-10 h-10" />
-            </div>
-            <h1 className="text-3xl font-bold mb-2">
-              {createdDoc.type === 'FACTURE' ? 'Facture' : 'Avoir'} créé(e) !
-            </h1>
-            <p className="text-gray-400">{createdDoc.numeroComplet}</p>
+      <div className="min-h-screen bg-gradient-to-br from-gray-100 to-gray-200 p-4 md:p-8">
+        <div className="max-w-4xl mx-auto">
+          {/* Actions */}
+          <div className="flex items-center justify-between mb-6">
+            <button onClick={reset} className="flex items-center gap-2 text-gray-600 hover:text-gray-900">
+              <RefreshCw className="w-5 h-5" /> Nouveau document
+            </button>
+            {createdDoc.stripePaymentLink && (
+              <button onClick={() => copyLink(createdDoc.stripePaymentLink!)} className="flex items-center gap-2 px-4 py-2 bg-white rounded-lg shadow hover:shadow-md">
+                <Copy className="w-4 h-4" /> Copier le lien
+              </button>
+            )}
           </div>
 
-          {/* Aperçu */}
-          <div className="bg-white text-black rounded-2xl p-8 mb-6">
-            <div className="flex justify-between items-start mb-6">
-              <div>
-                <p className="text-sm text-gray-500">Client</p>
-                <p className="font-bold">{createdDoc.client.raisonSociale}</p>
-                <p className="text-sm text-gray-500">{createdDoc.client.numDossier}</p>
-              </div>
-              <div className="text-right">
-                <p className="text-2xl font-bold">{fmt(createdDoc.montantTTC)}</p>
-                <p className="text-sm text-gray-500">TTC</p>
-              </div>
+          {/* Succès */}
+          <div className="bg-green-50 border border-green-200 rounded-2xl p-4 mb-6 flex items-center gap-3">
+            <Check className="w-6 h-6 text-green-600" />
+            <div>
+              <p className="font-semibold text-green-800">{createdDoc.type} créé(e) !</p>
+              <p className="text-sm text-green-600">{createdDoc.numeroComplet}</p>
             </div>
+          </div>
 
-            <div className="border-t pt-4">
-              {createdDoc.lignes.map((l, i) => (
-                <div key={i} className="flex justify-between py-2 text-sm">
-                  <span>{l.quantite}x {l.description}</span>
-                  <span>{fmt(l.montant)}</span>
+          {/* Document */}
+          <div className="bg-white rounded-2xl shadow-2xl overflow-hidden">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-zinc-900 to-zinc-800 text-white p-8">
+              <div className="flex justify-between items-start">
+                <div>
+                  <h1 className="text-3xl font-bold mb-3">{ENTREPRISE.nom}</h1>
+                  <div className="flex items-center gap-2 text-gray-300 text-sm mb-1">
+                    <MapPin className="w-4 h-4" />{ENTREPRISE.adresse}
+                  </div>
+                  <div className="flex items-center gap-2 text-gray-300 text-sm mb-1">
+                    <Phone className="w-4 h-4" />{ENTREPRISE.telephone}
+                  </div>
+                  <div className="flex items-center gap-2 text-gray-300 text-sm mb-1">
+                    <Mail className="w-4 h-4" />{ENTREPRISE.email}
+                  </div>
+                  <p className="text-gray-400 text-sm mt-2">SIRET: {ENTREPRISE.siret}</p>
                 </div>
-              ))}
+                <div className="text-right">
+                  <div className="inline-block bg-white/10 backdrop-blur rounded-xl px-6 py-4">
+                    <p className="text-3xl font-bold tracking-wider">{createdDoc.type}</p>
+                    <p className="text-xl text-gray-300 mt-1">{createdDoc.numeroComplet}</p>
+                  </div>
+                  <p className="text-gray-400 mt-4">{fmtDate(createdDoc.date)}</p>
+                </div>
+              </div>
             </div>
 
-            {createdDoc.reduction > 0 && (
-              <div className="flex justify-between py-2 text-red-500">
-                <span>Réduction</span>
-                <span>-{fmt(createdDoc.reduction)}</span>
+            {/* Client */}
+            <div className="p-8 border-b border-gray-100">
+              <div className="bg-gray-50 rounded-xl p-6">
+                <p className="text-xs text-gray-500 uppercase tracking-wider mb-3 font-semibold">Destinataire</p>
+                <h2 className="text-xl font-bold text-gray-900 mb-1">{createdDoc.client.raisonSociale}</h2>
+                <p className="text-gray-600 text-sm">Dossier: {createdDoc.client.numDossier}</p>
+                {createdDoc.client.adresse && <p className="text-gray-600 text-sm mt-2">{createdDoc.client.adresse}</p>}
+                {createdDoc.client.siret && <p className="text-gray-500 text-sm mt-1">SIRET: {createdDoc.client.siret}</p>}
+              </div>
+            </div>
+
+            {/* Lignes */}
+            <div className="p-8">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b-2 border-gray-900">
+                    <th className="text-left py-4 font-semibold">Description</th>
+                    <th className="text-center py-4 font-semibold w-20">Qté</th>
+                    <th className="text-right py-4 font-semibold w-32">P.U.</th>
+                    <th className="text-right py-4 font-semibold w-32">Montant</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {createdDoc.lignes.map((l, i) => (
+                    <tr key={i} className="border-b border-gray-100">
+                      <td className="py-4 text-gray-700">{l.description}</td>
+                      <td className="py-4 text-center text-gray-600">{l.quantite}</td>
+                      <td className="py-4 text-right text-gray-600">{fmt(l.prixUnitaire)}</td>
+                      <td className="py-4 text-right font-medium text-gray-900">{fmt(l.montant)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              {/* Totaux */}
+              <div className="mt-8 flex justify-end">
+                <div className="w-80 space-y-3">
+                  <div className="flex justify-between text-gray-600"><span>Sous-total</span><span>{fmt(createdDoc.sousTotal)}</span></div>
+                  {createdDoc.reduction > 0 && <div className="flex justify-between text-red-600"><span>Remise</span><span>-{fmt(createdDoc.reduction)}</span></div>}
+                  <div className="flex justify-between text-gray-600"><span>Total HT</span><span>{fmt(createdDoc.montantHT)}</span></div>
+                  <div className="flex justify-between text-gray-600"><span>TVA 20%</span><span>{fmt(createdDoc.montantTVA)}</span></div>
+                  <div className="flex justify-between pt-4 border-t-2 border-gray-900">
+                    <span className="text-xl font-bold">Total TTC</span>
+                    <span className="text-xl font-bold">{fmt(createdDoc.montantTTC)}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Stripe */}
+            {createdDoc.stripePaymentLink && (
+              <div className="bg-gradient-to-r from-green-50 to-emerald-50 p-8 border-t border-green-100">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="font-semibold text-green-800">Paiement en ligne</p>
+                    <p className="text-sm text-green-600">Partagez ce lien</p>
+                  </div>
+                  <div className="flex gap-3">
+                    <button onClick={() => copyLink(createdDoc.stripePaymentLink!)} className="flex items-center gap-2 px-4 py-2 bg-white border border-green-200 rounded-lg hover:bg-green-50">
+                      <Copy className="w-4 h-4" />Copier
+                    </button>
+                    <a href={createdDoc.stripePaymentLink} target="_blank" rel="noreferrer" className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
+                      <ExternalLink className="w-4 h-4" />Ouvrir
+                    </a>
+                  </div>
+                </div>
               </div>
             )}
 
-            <div className="border-t mt-4 pt-4 space-y-1 text-sm">
-              <div className="flex justify-between">
-                <span>HT</span><span>{fmt(createdDoc.montantHT)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>TVA 20%</span><span>{fmt(createdDoc.montantTVA)}</span>
-              </div>
-              <div className="flex justify-between font-bold text-lg pt-2">
-                <span>TTC</span><span>{fmt(createdDoc.montantTTC)}</span>
-              </div>
+            <div className="bg-gray-50 p-6 text-center text-sm text-gray-500">
+              Document généré par {ENTREPRISE.nom}
             </div>
           </div>
-
-          {createdDoc.stripePaymentLink && (
-            <a
-              href={createdDoc.stripePaymentLink}
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center justify-center gap-2 w-full py-4 bg-white text-black rounded-xl font-medium mb-4 hover:bg-gray-100 transition"
-            >
-              <ExternalLink className="w-5 h-5" />
-              Lien de paiement Stripe
-            </a>
-          )}
-
-          <button
-            onClick={reset}
-            className="flex items-center justify-center gap-2 w-full py-4 border border-white/20 rounded-xl hover:bg-white/5 transition"
-          >
-            <RefreshCw className="w-5 h-5" />
-            Nouveau document
-          </button>
         </div>
       </div>
     );
   }
 
+  // =============== INTERFACE PRINCIPALE ===============
   return (
     <div className="min-h-screen bg-black text-white">
       {/* Header */}
-      <header className="border-b border-white/10 p-6">
+      <header className="border-b border-white/10 p-4">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold">SmartCompta</h1>
-            <p className="text-sm text-gray-500">Facturation vocale</p>
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-blue-500 rounded-xl flex items-center justify-center">
+              <span className="font-bold">SC</span>
+            </div>
+            <span className="font-semibold text-lg">SociQl Compta</span>
           </div>
-          
-          {/* Toggle Facture / Avoir */}
-          <div className="flex bg-white/5 rounded-xl p-1">
-            <button
-              onClick={() => setDocType('FACTURE')}
-              className={`px-6 py-2 rounded-lg font-medium transition ${
-                docType === 'FACTURE' ? 'bg-white text-black' : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              <FileText className="w-4 h-4 inline mr-2" />
-              Facture
+          {selectedClient && (
+            <button onClick={reset} className="text-gray-400 hover:text-white flex items-center gap-2">
+              <RefreshCw className="w-4 h-4" /> Nouveau
             </button>
-            <button
-              onClick={() => setDocType('AVOIR')}
-              className={`px-6 py-2 rounded-lg font-medium transition ${
-                docType === 'AVOIR' ? 'bg-white text-black' : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              <Receipt className="w-4 h-4 inline mr-2" />
-              Avoir
-            </button>
-          </div>
+          )}
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto p-6">
+      {/* Messages */}
+      <div className="max-w-6xl mx-auto px-4">
         {error && (
-          <div className="bg-red-500/10 border border-red-500/20 text-red-400 px-4 py-3 rounded-xl mb-6 flex items-center justify-between">
+          <div className="mt-4 bg-red-500/10 border border-red-500/20 text-red-400 px-4 py-3 rounded-xl flex justify-between">
             <span>{error}</span>
             <button onClick={() => setError(null)}><X className="w-5 h-5" /></button>
           </div>
         )}
+        {success && (
+          <div className="mt-4 bg-green-500/10 border border-green-500/20 text-green-400 px-4 py-3 rounded-xl flex items-center gap-2">
+            <Check className="w-4 h-4" />{success}
+          </div>
+        )}
+      </div>
 
-        <div className="grid lg:grid-cols-2 gap-8">
-          {/* Colonne gauche - Client + Micro */}
-          <div className="space-y-6">
-            {/* Sélection client */}
+      <main className="max-w-6xl mx-auto p-4 md:p-6">
+        {/* Sélection client */}
+        {mode === 'select' && (
+          <div className="max-w-2xl mx-auto">
+            <div className="text-center mb-8">
+              <h1 className="text-3xl font-bold mb-2">Créer un document</h1>
+              <p className="text-gray-400">Sélectionnez ou ajoutez un client</p>
+            </div>
+
             <div className="bg-white/5 rounded-2xl p-6">
               <div className="flex items-center justify-between mb-4">
-                <h2 className="font-semibold">Client</h2>
-                <button
-                  onClick={() => setShowAddClient(true)}
-                  className="flex items-center gap-1 text-sm text-gray-400 hover:text-white"
-                >
-                  <Plus className="w-4 h-4" />
-                  Ajouter
+                <h2 className="font-semibold">Clients</h2>
+                <button onClick={() => setShowAddClient(true)} className="flex items-center gap-1 text-sm text-gray-400 hover:text-white">
+                  <Plus className="w-4 h-4" /> Ajouter
                 </button>
               </div>
 
-              {selectedClient ? (
-                <div className="flex items-center justify-between bg-white/5 rounded-xl p-4">
-                  <div>
-                    <p className="font-medium">{selectedClient.raisonSociale}</p>
-                    <p className="text-sm text-gray-400">{selectedClient.numDossier}</p>
-                  </div>
-                  <button onClick={() => setSelectedClient(null)} className="text-gray-400 hover:text-white">
-                    <X className="w-5 h-5" />
+              <div className="relative mb-4">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Rechercher..."
+                  className="w-full pl-10 pr-4 py-3 bg-white/5 border border-white/10 rounded-xl focus:outline-none focus:border-white/30"
+                />
+              </div>
+
+              <div className="space-y-2 max-h-96 overflow-y-auto">
+                {clients.map((c) => (
+                  <button
+                    key={c.id}
+                    onClick={() => { setSelectedClient(c); setMode('create'); }}
+                    className="w-full flex items-center justify-between p-4 bg-white/5 rounded-xl hover:bg-white/10 text-left"
+                  >
+                    <div>
+                      <p className="font-medium">{c.raisonSociale}</p>
+                      <p className="text-sm text-gray-500">{c.numDossier}</p>
+                    </div>
+                    <ChevronRight className="w-5 h-5 text-gray-500" />
                   </button>
-                </div>
-              ) : (
-                <>
-                  <div className="relative mb-4">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
-                    <input
-                      type="text"
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="Rechercher..."
-                      className="w-full pl-10 pr-4 py-3 bg-white/5 border border-white/10 rounded-xl focus:outline-none focus:border-white/30"
-                    />
+                ))}
+                {clients.length === 0 && (
+                  <div className="text-center py-12 text-gray-500">
+                    <Building2 className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                    <p>Aucun client</p>
                   </div>
-                  <div className="max-h-60 overflow-y-auto space-y-2">
-                    {clients.map(c => (
-                      <button
-                        key={c.id}
-                        onClick={() => { setSelectedClient(c); setMode('create'); }}
-                        className="w-full flex items-center justify-between p-3 bg-white/5 rounded-xl hover:bg-white/10 transition text-left"
-                      >
-                        <div>
-                          <p className="font-medium">{c.raisonSociale}</p>
-                          <p className="text-sm text-gray-500">{c.numDossier}</p>
-                        </div>
-                        <ChevronRight className="w-5 h-5 text-gray-500" />
-                      </button>
-                    ))}
-                    {clients.length === 0 && (
-                      <p className="text-center text-gray-500 py-8">Aucun client</p>
-                    )}
-                  </div>
-                </>
-              )}
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Création document */}
+        {mode === 'create' && selectedClient && (
+          <>
+            {/* Type de document */}
+            <div className="flex justify-center mb-6">
+              <div className="flex bg-white/5 rounded-xl p-1">
+                {(['FACTURE', 'DEVIS', 'AVOIR'] as const).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setDocType(t)}
+                    className={`px-6 py-2.5 rounded-lg font-medium transition ${docType === t ? 'bg-white text-black' : 'text-gray-400 hover:text-white'}`}
+                  >
+                    {t === 'FACTURE' && <FileText className="w-4 h-4 inline mr-2" />}
+                    {t === 'DEVIS' && <FileSpreadsheet className="w-4 h-4 inline mr-2" />}
+                    {t === 'AVOIR' && <Receipt className="w-4 h-4 inline mr-2" />}
+                    {t}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            {/* Zone Micro */}
-            {selectedClient && (
-              <div className="bg-white/5 rounded-2xl p-8">
-                <div className="text-center">
-                  <button
-                    onClick={isRecording ? stopRecording : startRecording}
-                    disabled={loading}
-                    className={`w-24 h-24 rounded-full flex items-center justify-center mx-auto transition-all ${
-                      isRecording 
-                        ? 'bg-red-500 recording-pulse' 
-                        : 'bg-white hover:scale-105'
-                    }`}
-                  >
-                    {loading ? (
-                      <div className="w-8 h-8 border-3 border-black border-t-transparent rounded-full animate-spin" />
-                    ) : isRecording ? (
-                      <MicOff className="w-10 h-10 text-white" />
-                    ) : (
-                      <Mic className="w-10 h-10 text-black" />
-                    )}
-                  </button>
+            <div className="grid lg:grid-cols-2 gap-6">
+              {/* Colonne gauche */}
+              <div className="space-y-6">
+                {/* Client sélectionné */}
+                <div className="bg-white/5 rounded-2xl p-6">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm text-gray-400">Client</p>
+                      <p className="font-semibold text-lg">{selectedClient.raisonSociale}</p>
+                      <p className="text-sm text-gray-500">{selectedClient.numDossier}</p>
+                    </div>
+                    <button onClick={() => setMode('select')} className="text-gray-400 hover:text-white">
+                      Changer
+                    </button>
+                  </div>
+                </div>
 
-                  <p className="mt-4 text-sm text-gray-400">
-                    {loading ? 'Traitement...' : isRecording ? 'Parlez...' : 'Cliquez pour dicter'}
-                  </p>
+                {/* Dictée vocale */}
+                <div className="bg-white/5 rounded-2xl p-6">
+                  <h2 className="font-semibold mb-4">🎙️ Dictée vocale</h2>
+                  
+                  <div className="text-center mb-6">
+                    <button
+                      onClick={isRecording ? stopRecording : startRecording}
+                      disabled={loading}
+                      className={`w-24 h-24 rounded-full flex items-center justify-center mx-auto transition-all shadow-xl ${
+                        isRecording ? 'bg-red-500 animate-pulse' : 'bg-gradient-to-br from-purple-500 to-blue-500 hover:scale-105'
+                      }`}
+                    >
+                      {loading ? (
+                        <div className="w-8 h-8 border-3 border-white border-t-transparent rounded-full animate-spin" />
+                      ) : isRecording ? (
+                        <MicOff className="w-10 h-10 text-white" />
+                      ) : (
+                        <Mic className="w-10 h-10 text-white" />
+                      )}
+                    </button>
+                    <p className="mt-4 text-sm text-gray-400">
+                      {audioStatus || (isRecording ? 'Cliquez pour arrêter' : 'Cliquez pour parler')}
+                    </p>
+                  </div>
 
+                  {/* Transcriptions */}
                   {transcriptions.length > 0 && (
-                    <div className="mt-6 text-left">
+                    <div className="mb-4">
                       <p className="text-xs text-gray-500 mb-2">Transcriptions :</p>
                       {transcriptions.map((t, i) => (
-                        <p key={i} className="text-sm text-gray-300 bg-white/5 rounded-lg p-2 mb-2">
-                          "{t}"
-                        </p>
+                        <div key={i} className="text-sm text-gray-300 bg-white/5 rounded-lg p-3 mb-2">"{t}"</div>
                       ))}
                       <button
                         onClick={startRecording}
                         disabled={isRecording || loading}
-                        className="text-sm text-gray-400 hover:text-white mt-2"
+                        className="text-sm text-purple-400 hover:text-purple-300 mt-2"
                       >
-                        + Ajouter une dictée
+                        + Continuer la dictée
                       </button>
                     </div>
                   )}
-                </div>
-              </div>
-            )}
-          </div>
 
-          {/* Colonne droite - Lignes + Total */}
-          <div className="space-y-6">
-            {/* Lignes */}
-            <div className="bg-white/5 rounded-2xl p-6">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="font-semibold">Lignes</h2>
-                <button onClick={addLigne} className="flex items-center gap-1 text-sm text-gray-400 hover:text-white">
-                  <Plus className="w-4 h-4" />
-                  Ajouter
-                </button>
-              </div>
-
-              {lignes.length === 0 ? (
-                <p className="text-center text-gray-500 py-8">
-                  Dictez ou ajoutez des lignes
-                </p>
-              ) : (
-                <div className="space-y-3">
-                  {lignes.map((l, i) => (
-                    <div key={i} className="flex gap-2 items-start">
-                      <input
-                        type="text"
-                        value={l.description}
-                        onChange={(e) => updateLigne(i, 'description', e.target.value)}
-                        placeholder="Description"
-                        className="flex-[3] px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm focus:outline-none focus:border-white/30"
-                      />
-                      <input
-                        type="number"
-                        value={l.quantite}
-                        onChange={(e) => updateLigne(i, 'quantite', Number(e.target.value))}
-                        className="w-16 px-2 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-center focus:outline-none"
-                      />
-                      <input
-                        type="number"
-                        value={l.prixUnitaire || ''}
-                        onChange={(e) => updateLigne(i, 'prixUnitaire', Number(e.target.value))}
-                        placeholder="€"
-                        className="w-20 px-2 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-right focus:outline-none"
-                      />
-                      <span className="w-24 py-2 text-right text-sm">{fmt(l.montant)}</span>
-                      <button onClick={() => removeLigne(i)} className="p-2 text-gray-500 hover:text-red-400">
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Réduction */}
-              <div className="mt-4 pt-4 border-t border-white/10">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-400">Réduction</span>
-                  <input
-                    type="number"
-                    value={reduction || ''}
-                    onChange={(e) => setReduction(Number(e.target.value))}
-                    className="w-32 px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-right focus:outline-none"
-                    placeholder="0.00"
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* Total */}
-            <div className="bg-white text-black rounded-2xl p-6">
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Sous-total</span>
-                  <span>{fmt(sousTotal)}</span>
-                </div>
-                {reduction > 0 && (
-                  <div className="flex justify-between text-red-500">
-                    <span>Réduction</span>
-                    <span>-{fmt(reduction)}</span>
+                  {/* Texte manuel */}
+                  <div className="border-t border-white/10 pt-4 mt-4">
+                    <p className="text-xs text-gray-500 mb-2">Ou saisissez manuellement :</p>
+                    <textarea
+                      value={texteManuel}
+                      onChange={(e) => setTexteManuel(e.target.value)}
+                      placeholder="Ex: Prestation web 5 jours à 400€, réduction 50€..."
+                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl focus:outline-none resize-none h-24"
+                    />
+                    <button
+                      onClick={extractFromText}
+                      disabled={!texteManuel.trim() || loading}
+                      className="w-full mt-2 py-2 bg-white/10 rounded-lg text-sm hover:bg-white/20 disabled:opacity-50"
+                    >
+                      Extraire les lignes
+                    </button>
                   </div>
-                )}
-                <div className="flex justify-between">
-                  <span className="text-gray-500">HT</span>
-                  <span>{fmt(montantHT)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500">TVA 20%</span>
-                  <span>{fmt(montantTVA)}</span>
-                </div>
-                <div className="flex justify-between text-xl font-bold pt-2 border-t">
-                  <span>TTC</span>
-                  <span>{fmt(montantTTC)}</span>
                 </div>
               </div>
 
-              <button
-                onClick={createDocument}
-                disabled={!selectedClient || lignes.length === 0 || loading}
-                className="w-full mt-6 py-4 bg-black text-white rounded-xl font-medium hover:bg-gray-800 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-              >
-                {loading ? (
-                  <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                ) : (
-                  <>
-                    <CreditCard className="w-5 h-5" />
-                    Créer {docType === 'FACTURE' ? 'la facture' : "l'avoir"}
-                  </>
-                )}
-              </button>
+              {/* Colonne droite */}
+              <div className="space-y-6">
+                {/* Lignes */}
+                <div className="bg-white/5 rounded-2xl p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="font-semibold">Lignes</h2>
+                    <button onClick={addLigne} className="flex items-center gap-1 text-sm text-gray-400 hover:text-white">
+                      <Plus className="w-4 h-4" /> Ajouter
+                    </button>
+                  </div>
+
+                  {lignes.length === 0 ? (
+                    <div className="text-center py-8 text-gray-500">
+                      <FileText className="w-10 h-10 mx-auto mb-3 opacity-50" />
+                      <p>Dictez ou ajoutez des lignes</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {lignes.map((l, i) => (
+                        <div key={i} className="flex gap-2 items-start bg-white/5 rounded-xl p-3">
+                          <input
+                            type="text"
+                            value={l.description}
+                            onChange={(e) => updateLigne(i, 'description', e.target.value)}
+                            placeholder="Description"
+                            className="flex-1 px-3 py-2 bg-transparent border border-white/10 rounded-lg text-sm focus:outline-none"
+                          />
+                          <input
+                            type="number"
+                            value={l.quantite}
+                            onChange={(e) => updateLigne(i, 'quantite', Number(e.target.value))}
+                            className="w-16 px-2 py-2 bg-transparent border border-white/10 rounded-lg text-sm text-center focus:outline-none"
+                            min="1"
+                          />
+                          <input
+                            type="number"
+                            value={l.prixUnitaire || ''}
+                            onChange={(e) => updateLigne(i, 'prixUnitaire', Number(e.target.value))}
+                            placeholder="€"
+                            className="w-24 px-2 py-2 bg-transparent border border-white/10 rounded-lg text-sm text-right focus:outline-none"
+                          />
+                          <span className="w-24 py-2 text-right text-sm font-medium">{fmt(l.montant)}</span>
+                          <button onClick={() => removeLigne(i)} className="p-2 text-gray-500 hover:text-red-400">
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Réduction */}
+                  <div className="mt-4 pt-4 border-t border-white/10 flex items-center justify-between">
+                    <span className="text-sm text-gray-400">Réduction (€)</span>
+                    <input
+                      type="number"
+                      value={reduction || ''}
+                      onChange={(e) => setReduction(Number(e.target.value))}
+                      className="w-32 px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-right focus:outline-none"
+                      placeholder="0"
+                    />
+                  </div>
+                </div>
+
+                {/* Total */}
+                <div className="bg-gradient-to-br from-zinc-900 to-zinc-800 rounded-2xl p-6">
+                  <div className="space-y-3 text-sm">
+                    <div className="flex justify-between text-gray-400"><span>Sous-total</span><span>{fmt(sousTotal)}</span></div>
+                    {reduction > 0 && <div className="flex justify-between text-red-400"><span>Réduction</span><span>-{fmt(reduction)}</span></div>}
+                    <div className="flex justify-between text-gray-400"><span>HT</span><span>{fmt(montantHT)}</span></div>
+                    <div className="flex justify-between text-gray-400"><span>TVA 20%</span><span>{fmt(montantTVA)}</span></div>
+                    <div className="flex justify-between text-2xl font-bold pt-3 border-t border-white/10"><span>TTC</span><span>{fmt(montantTTC)}</span></div>
+                  </div>
+
+                  <button
+                    onClick={createDocument}
+                    disabled={lignes.length === 0 || loading}
+                    className="w-full mt-6 py-4 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-xl font-semibold hover:opacity-90 disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    {loading ? (
+                      <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <>
+                        <Check className="w-5 h-5" />
+                        Créer {docType === 'FACTURE' ? 'la facture' : docType === 'DEVIS' ? 'le devis' : "l'avoir"}
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
+          </>
+        )}
       </main>
 
       {/* Modal Ajouter Client */}
       {showAddClient && (
-        <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
-          <div className="bg-zinc-900 rounded-2xl max-w-md w-full p-6">
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-zinc-900 border border-white/10 rounded-2xl max-w-md w-full p-6">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-xl font-bold">Ajouter un client</h2>
-              <button onClick={() => setShowAddClient(false)}>
+              <button onClick={() => setShowAddClient(false)} className="text-gray-400 hover:text-white">
                 <X className="w-6 h-6" />
               </button>
             </div>
@@ -630,7 +824,7 @@ export default function Home() {
             <div className="mb-6">
               <label className="block text-sm text-gray-400 mb-2">
                 <Link className="w-4 h-4 inline mr-1" />
-                Depuis une URL (Pappers, Societe.com...)
+                Import URL (Pappers, Societe.com...)
               </label>
               <div className="flex gap-2">
                 <input
@@ -638,65 +832,71 @@ export default function Home() {
                   value={urlInput}
                   onChange={(e) => setUrlInput(e.target.value)}
                   placeholder="https://www.pappers.fr/entreprise/..."
-                  className="flex-1 px-4 py-3 bg-white/5 border border-white/10 rounded-xl focus:outline-none focus:border-white/30"
+                  className="flex-1 px-4 py-3 bg-white/5 border border-white/10 rounded-xl focus:outline-none"
                 />
                 <button
                   onClick={addClientByUrl}
                   disabled={loading || !urlInput}
                   className="px-4 py-3 bg-white text-black rounded-xl font-medium hover:bg-gray-200 disabled:opacity-50"
                 >
-                  {loading ? '...' : 'Importer'}
+                  {loading ? '...' : 'Go'}
                 </button>
               </div>
             </div>
 
             <div className="relative my-6">
-              <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-white/10"></div>
-              </div>
-              <div className="relative flex justify-center">
-                <span className="px-4 bg-zinc-900 text-sm text-gray-500">ou</span>
-              </div>
+              <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-white/10" /></div>
+              <div className="relative flex justify-center"><span className="px-4 bg-zinc-900 text-sm text-gray-500">ou</span></div>
             </div>
 
             {/* Manuel */}
             <div className="space-y-4">
-              <div>
-                <label className="block text-sm text-gray-400 mb-1">Numéro de dossier</label>
-                <input
-                  type="text"
-                  value={manualClient.numDossier}
-                  onChange={(e) => setManualClient({ ...manualClient, numDossier: e.target.value.toUpperCase() })}
-                  placeholder="Ex: AB1234"
-                  className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl focus:outline-none focus:border-white/30"
-                />
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm text-gray-400 mb-1">N° Dossier *</label>
+                  <input
+                    type="text"
+                    value={manualClient.numDossier}
+                    onChange={(e) => setManualClient({ ...manualClient, numDossier: e.target.value.toUpperCase() })}
+                    placeholder="AB1234"
+                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-400 mb-1">SIRET</label>
+                  <input
+                    type="text"
+                    value={manualClient.siret}
+                    onChange={(e) => setManualClient({ ...manualClient, siret: e.target.value })}
+                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl focus:outline-none"
+                  />
+                </div>
               </div>
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Raison sociale</label>
+                <label className="block text-sm text-gray-400 mb-1">Raison sociale *</label>
                 <input
                   type="text"
                   value={manualClient.raisonSociale}
                   onChange={(e) => setManualClient({ ...manualClient, raisonSociale: e.target.value })}
                   placeholder="Nom de l'entreprise"
-                  className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl focus:outline-none focus:border-white/30"
+                  className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl focus:outline-none"
                 />
               </div>
               <div>
-                <label className="block text-sm text-gray-400 mb-1">SIRET (optionnel)</label>
+                <label className="block text-sm text-gray-400 mb-1">Adresse</label>
                 <input
                   type="text"
-                  value={manualClient.siret}
-                  onChange={(e) => setManualClient({ ...manualClient, siret: e.target.value })}
-                  placeholder="12345678901234"
-                  className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl focus:outline-none focus:border-white/30"
+                  value={manualClient.adresse}
+                  onChange={(e) => setManualClient({ ...manualClient, adresse: e.target.value })}
+                  className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl focus:outline-none"
                 />
               </div>
               <button
                 onClick={addClientManual}
                 disabled={loading || !manualClient.numDossier || !manualClient.raisonSociale}
-                className="w-full py-4 bg-white text-black rounded-xl font-medium hover:bg-gray-200 disabled:opacity-50"
+                className="w-full py-4 bg-white text-black rounded-xl font-semibold hover:bg-gray-100 disabled:opacity-50"
               >
-                Créer le client
+                {loading ? '...' : 'Créer le client'}
               </button>
             </div>
           </div>

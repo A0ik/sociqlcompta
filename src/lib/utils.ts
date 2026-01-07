@@ -1,13 +1,18 @@
 import prisma from './prisma';
 
-export async function getNextDocumentNumber(type: 'FACTURE' | 'AVOIR'): Promise<{
+export async function getNextDocumentNumber(type: 'FACTURE' | 'AVOIR' | 'DEVIS'): Promise<{
   numeroSequentiel: number;
   prefixe: string;
   numeroComplet: string;
 }> {
   const annee = new Date().getFullYear();
-  const prefixe = type === 'FACTURE' ? `FA-${annee}-` : `AV-${annee}-`;
-  const seqId = `${type}_SEQ`;
+  const prefixes: Record<string, string> = {
+    'FACTURE': `FA-${annee}-`,
+    'DEVIS': `DV-${annee}-`,
+    'AVOIR': `AV-${annee}-`,
+  };
+  const prefixe = prefixes[type] || `XX-${annee}-`;
+  const seqId = `${type}_SEQ_${annee}`;
 
   const result = await prisma.$transaction(async (tx) => {
     let seq = await tx.sequence.findUnique({ where: { id: seqId } });

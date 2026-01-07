@@ -114,12 +114,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: result.ok, ...result });
     }
 
-    // Création document (facture ou avoir)
+    // Création document (facture, devis ou avoir)
     if (body.action === 'create') {
       const { type, clientId, lignes, reduction = 0, factureOrigineId } = body;
 
       if (!clientId || !lignes?.length) {
         return NextResponse.json({ error: 'Données manquantes' }, { status: 400 });
+      }
+
+      if (!['FACTURE', 'DEVIS', 'AVOIR'].includes(type)) {
+        return NextResponse.json({ error: 'Type invalide' }, { status: 400 });
       }
 
       const client = await prisma.client.findUnique({ where: { id: clientId } });
@@ -129,6 +133,7 @@ export async function POST(req: NextRequest) {
       const montants = calculerMontants(sousTotal, reduction);
       const { numeroSequentiel, prefixe, numeroComplet } = await getNextDocumentNumber(type);
 
+      // Stripe uniquement pour les factures
       let stripeUrl = null, stripeId = null;
       if (type === 'FACTURE' && process.env.STRIPE_SECRET_KEY) {
         const desc = lignes.map((l: Ligne) => `${l.quantite}x ${l.description}`).join(', ');

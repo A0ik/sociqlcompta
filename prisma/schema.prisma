@@ -30,12 +30,12 @@ model Client {
   @@index([raisonSociale])
 }
 
-// Document peut être une FACTURE ou un AVOIR
+// Document: FACTURE, DEVIS ou AVOIR
 model Document {
   id                String        @id @default(cuid())
-  type              String        // FACTURE ou AVOIR
-  numeroSequentiel  Int           @unique
-  prefixe           String        // FA-2026- ou AV-2026-
+  type              String        // FACTURE, DEVIS ou AVOIR
+  numeroSequentiel  Int
+  prefixe           String        // FA-2026-, DV-2026- ou AV-2026-
   numeroComplet     String        @unique
   date              DateTime      @default(now())
   
