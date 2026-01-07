@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useCallback, useRef, useEffect } from 'react';
+import * as XLSX from 'xlsx';
 import { 
   Mic, MicOff, Plus, Search, Link, FileText, RefreshCw, 
   Trash2, Check, X, Building2, CreditCard, Receipt,
@@ -45,11 +46,11 @@ const fmtDate = (d: string) => new Intl.DateTimeFormat('fr-FR', { day: '2-digit'
 
 // Config entreprise (à personnaliser)
 const ENTREPRISE = {
-  nom: "Live & Best Consulting",
-  adresse: "19 AVENUE JEAN MOULIN, 93100 MONTREUIL",
-  siret: "805 360 963 00021",
-  telephone: "06 58 67 06 46",
-  email: "Liveandbest@gmail.com"
+  nom: "SmartCompta",
+  adresse: "123 rue de la Comptabilité, 75001 Paris",
+  siret: "123 456 789 00012",
+  telephone: "01 23 45 67 89",
+  email: "contact@smartcompta.fr"
 };
 
 export default function Home() {
@@ -103,6 +104,51 @@ export default function Home() {
     const timer = setTimeout(() => loadClients(), 300);
     return () => clearTimeout(timer);
   }, [searchQuery, loadClients]);
+
+  // =============== IMPORT EXCEL ===============
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data);
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const json = XLSX.utils.sheet_to_json(sheet);
+
+      if (json.length === 0) {
+        setError('Fichier vide');
+        setLoading(false);
+        return;
+      }
+
+      // Envoyer à l'API (qui gère les variantes de noms de colonnes)
+      const res = await fetch('/api/import-dossiers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clients: json }),
+      });
+
+      const result = await res.json();
+
+      if (result.success) {
+        setSuccess(`${result.created} créé(s), ${result.updated} mis à jour, ${result.skipped} ignoré(s)`);
+        loadClients();
+        setTimeout(() => setSuccess(null), 5000);
+      } else {
+        setError(result.error || 'Erreur import');
+      }
+    } catch (err) {
+      setError('Erreur lecture fichier');
+      console.error(err);
+    }
+
+    setLoading(false);
+    e.target.value = '';
+  };
 
   // =============== ENREGISTREMENT AUDIO AMÉLIORÉ ===============
   const startRecording = async () => {
@@ -537,7 +583,7 @@ export default function Home() {
             <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-blue-500 rounded-xl flex items-center justify-center">
               <span className="font-bold">SC</span>
             </div>
-            <span className="font-semibold text-lg">SociQl Compta</span>
+            <span className="font-semibold text-lg">SmartCompta</span>
           </div>
           {selectedClient && (
             <button onClick={reset} className="text-gray-400 hover:text-white flex items-center gap-2">
@@ -574,9 +620,21 @@ export default function Home() {
             <div className="bg-white/5 rounded-2xl p-6">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="font-semibold">Clients</h2>
-                <button onClick={() => setShowAddClient(true)} className="flex items-center gap-1 text-sm text-gray-400 hover:text-white">
-                  <Plus className="w-4 h-4" /> Ajouter
-                </button>
+                <div className="flex items-center gap-2">
+                  <label className="flex items-center gap-1 text-sm text-gray-400 hover:text-white cursor-pointer">
+                    <Upload className="w-4 h-4" />
+                    <span>Excel</span>
+                    <input
+                      type="file"
+                      accept=".xlsx,.xls,.csv"
+                      onChange={handleFileUpload}
+                      className="hidden"
+                    />
+                  </label>
+                  <button onClick={() => setShowAddClient(true)} className="flex items-center gap-1 text-sm text-gray-400 hover:text-white">
+                    <Plus className="w-4 h-4" /> Ajouter
+                  </button>
+                </div>
               </div>
 
               <div className="relative mb-4">
