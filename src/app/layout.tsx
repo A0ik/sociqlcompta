@@ -1,10 +1,9 @@
-import type { Metadata } from "next";
-import "./globals.css";
-import { Providers } from "@/components/Providers";
+import type { Metadata } from 'next';
+import './globals.css';
 
 export const metadata: Metadata = {
-  title: "SociQl Compta - Facturation Intelligente",
-  description: "Créez vos factures, devis et avoirs par la voix",
+  title: 'SmartCompta Voice - Facturation Vocale',
+  description: 'Application de facturation vocale pour cabinet comptable',
 };
 
 export default function RootLayout({
@@ -14,8 +13,8 @@ export default function RootLayout({
 }) {
   return (
     <html lang="fr">
-      <body className="bg-black text-white antialiased">
-        <Providers>{children}</Providers>
+      <body className="antialiased">
+        {children}
       </body>
     </html>
   );

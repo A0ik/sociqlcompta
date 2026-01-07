@@ -1,3 +1,6 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -8,129 +11,80 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
-model Account {
-  id                String  @id @default(cuid())
-  userId            String
-  type              String
-  provider          String
-  providerAccountId String
-  refresh_token     String? @db.Text
-  access_token      String? @db.Text
-  expires_at        Int?
-  token_type        String?
-  scope             String?
-  id_token          String? @db.Text
-  session_state     String?
-  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([provider, providerAccountId])
-}
-
-model Session {
-  id           String   @id @default(cuid())
-  sessionToken String   @unique
-  userId       String
-  expires      DateTime
-  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-}
-
-model VerificationToken {
-  identifier String
-  token      String   @unique
-  expires    DateTime
-
-  @@unique([identifier, token])
-}
-
-model User {
-  id                 String     @id @default(cuid())
-  name               String?
-  email              String?    @unique
-  emailVerified      DateTime?
-  password           String?
-  image              String?
-  subscriptionStatus String     @default("inactive")
-  subscriptionId     String?
-  createdAt          DateTime   @default(now())
-  accounts           Account[]
-  sessions           Session[]
-  company            Company?
-  clients            Client[]
-  documents          Document[]
-}
-
-model Company {
-  id              String  @id @default(cuid())
-  userId          String  @unique
-  user            User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  nom             String
-  adresse         String?
-  siret           String?
-  email           String?
-  telephone       String?
-  stripeSecretKey String?
-}
-
+// Table des dossiers clients (200+ entreprises)
 model Client {
-  id            String     @id @default(cuid())
-  userId        String
-  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  numDossier    String
-  raisonSociale String
-  adresse       String?
-  siret         String?
-  siren         String?
-  email         String?
-  telephone     String?
-  createdAt     DateTime   @default(now())
-  documents     Document[]
+  id              String    @id @default(cuid())
+  numDossier      String    @unique // Numéro unique du dossier (indexé)
+  raisonSociale   String    // Nom de la société
+  adresse         String?   // Adresse complète
+  siret           String?   // Numéro SIRET
+  codeNaf         String?   // Code NAF/APE
+  centre          String?   // Centre de gestion
+  periode         String?   // Période comptable
+  domaineActivite String?   // Domaine d'activité
+  emailContact    String?   // Email de contact (optionnel)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  factures        Facture[] // Relation avec les factures
 
-  @@unique([userId, numDossier])
-  @@index([userId])
+  @@index([numDossier])
+  @@index([raisonSociale])
 }
 
-model Document {
-  id                String   @id @default(cuid())
-  userId            String
-  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  type              String
-  numero            Int
-  numeroComplet     String
-  sousTotal         Float
-  reduction         Float    @default(0)
-  montantHT         Float
-  tauxTVA           Float    @default(20)
-  montantTVA        Float
-  montantTTC        Float
-  stripePaymentLink String?
-  statut            String   @default("EN_ATTENTE")
-  clientId          String
-  client            Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  lignes            Ligne[]
-  createdAt         DateTime @default(now())
+// Table des factures
+model Facture {
+  id                String        @id @default(cuid())
+  numeroSequentiel  Int           @unique // Numéro séquentiel auto-incrémenté (UNIQUE)
+  prefixe           String        @default("FA-2026-") // Préfixe de la facture
+  numeroComplet     String        @unique // Numéro complet formaté (FA-2026-0001) (UNIQUE)
+  date              DateTime      @default(now())
+  
+  // Montants calculés
+  sousTotal         Float         // Sous-total avant réduction
+  reduction         Float         @default(0) // Montant de la réduction
+  montantHT         Float         // Montant HT après réduction
+  tauxTVA           Float         @default(20.0) // Taux de TVA (20%)
+  montantTVA        Float         // Montant de la TVA
+  montantTTC        Float         // Montant toutes taxes comprises
+  
+  // Stripe
+  stripePaymentLink String?       // URL du lien de paiement Stripe
+  stripePaymentId   String?       // ID du paiement Stripe
+  statut            String        @default("EN_ATTENTE") // EN_ATTENTE, PAYEE, ANNULEE
+  
+  // Relations
+  clientId          String        // Relation avec le client
+  client            Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  lignes            LigneFacture[] // Lignes de détail
+  
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
 
-  @@index([userId])
+  @@index([numeroSequentiel])
+  @@index([clientId])
+  @@index([statut])
 }
 
-model Ligne {
-  id           String   @id @default(cuid())
-  description  String
-  quantite     Int      @default(1)
-  prixUnitaire Float
-  montant      Float
-  documentId   String
-  document     Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+// Table des lignes de facture (détails)
+model LigneFacture {
+  id          String   @id @default(cuid())
+  description String   // Ex: "Fiche de paie"
+  quantite    Int      @default(1) // Ex: 5
+  prixUnitaire Float   // Ex: 30.00
+  montant     Float    // quantite * prixUnitaire
+  
+  factureId   String
+  facture     Facture  @relation(fields: [factureId], references: [id], onDelete: Cascade)
+  
+  createdAt   DateTime @default(now())
+
+  @@index([factureId])
 }
 
+// Table de séquence pour garantir l'unicité des numéros de facture
 model Sequence {
-  id     String @id
-  numero Int    @default(0)
-}
-
-model Contact {
-  id        String   @id @default(cuid())
-  nom       String
-  email     String
-  message   String
-  createdAt DateTime @default(now())
+  id            String   @id @default("FACTURE_SEQ")
+  dernierNumero Int      @default(0) // Dernier numéro utilisé
+  annee         Int      @default(2026) // Année en cours
+  updatedAt     DateTime @updatedAt
 }
