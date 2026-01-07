@@ -1,6 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -11,80 +8,83 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
-// Table des dossiers clients (200+ entreprises)
 model Client {
-  id              String    @id @default(cuid())
-  numDossier      String    @unique // Numéro unique du dossier (indexé)
-  raisonSociale   String    // Nom de la société
-  adresse         String?   // Adresse complète
-  siret           String?   // Numéro SIRET
-  codeNaf         String?   // Code NAF/APE
-  centre          String?   // Centre de gestion
-  periode         String?   // Période comptable
-  domaineActivite String?   // Domaine d'activité
-  emailContact    String?   // Email de contact (optionnel)
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  factures        Facture[] // Relation avec les factures
+  id              String     @id @default(cuid())
+  numDossier      String     @unique
+  raisonSociale   String
+  adresse         String?
+  siret           String?
+  siren           String?
+  codeNaf         String?
+  formeJuridique  String?
+  capital         String?
+  dirigeant       String?
+  emailContact    String?
+  telephone       String?
+  siteWeb         String?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  documents       Document[]
 
   @@index([numDossier])
   @@index([raisonSociale])
 }
 
-// Table des factures
-model Facture {
+// Document peut être une FACTURE ou un AVOIR
+model Document {
   id                String        @id @default(cuid())
-  numeroSequentiel  Int           @unique // Numéro séquentiel auto-incrémenté (UNIQUE)
-  prefixe           String        @default("FA-2026-") // Préfixe de la facture
-  numeroComplet     String        @unique // Numéro complet formaté (FA-2026-0001) (UNIQUE)
+  type              String        // FACTURE ou AVOIR
+  numeroSequentiel  Int           @unique
+  prefixe           String        // FA-2026- ou AV-2026-
+  numeroComplet     String        @unique
   date              DateTime      @default(now())
   
-  // Montants calculés
-  sousTotal         Float         // Sous-total avant réduction
-  reduction         Float         @default(0) // Montant de la réduction
-  montantHT         Float         // Montant HT après réduction
-  tauxTVA           Float         @default(20.0) // Taux de TVA (20%)
-  montantTVA        Float         // Montant de la TVA
-  montantTTC        Float         // Montant toutes taxes comprises
+  // Référence à la facture d'origine (pour les avoirs)
+  factureOrigineId  String?
+  factureOrigine    Document?     @relation("AvoirFacture", fields: [factureOrigineId], references: [id])
+  avoirs            Document[]    @relation("AvoirFacture")
+  
+  // Montants
+  sousTotal         Float
+  reduction         Float         @default(0)
+  montantHT         Float
+  tauxTVA           Float         @default(20.0)
+  montantTVA        Float
+  montantTTC        Float
   
   // Stripe
-  stripePaymentLink String?       // URL du lien de paiement Stripe
-  stripePaymentId   String?       // ID du paiement Stripe
+  stripePaymentLink String?
+  stripePaymentId   String?
   statut            String        @default("EN_ATTENTE") // EN_ATTENTE, PAYEE, ANNULEE
   
   // Relations
-  clientId          String        // Relation avec le client
+  clientId          String
   client            Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  lignes            LigneFacture[] // Lignes de détail
+  lignes            LigneDocument[]
   
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
 
-  @@index([numeroSequentiel])
+  @@index([type])
   @@index([clientId])
-  @@index([statut])
 }
 
-// Table des lignes de facture (détails)
-model LigneFacture {
-  id          String   @id @default(cuid())
-  description String   // Ex: "Fiche de paie"
-  quantite    Int      @default(1) // Ex: 5
-  prixUnitaire Float   // Ex: 30.00
-  montant     Float    // quantite * prixUnitaire
+model LigneDocument {
+  id           String   @id @default(cuid())
+  description  String
+  quantite     Int      @default(1)
+  prixUnitaire Float
+  montant      Float
   
-  factureId   String
-  facture     Facture  @relation(fields: [factureId], references: [id], onDelete: Cascade)
+  documentId   String
+  document     Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
   
-  createdAt   DateTime @default(now())
-
-  @@index([factureId])
+  @@index([documentId])
 }
 
-// Table de séquence pour garantir l'unicité des numéros de facture
 model Sequence {
-  id            String   @id @default("FACTURE_SEQ")
-  dernierNumero Int      @default(0) // Dernier numéro utilisé
-  annee         Int      @default(2026) // Année en cours
+  id            String   @id
+  dernierNumero Int      @default(0)
+  annee         Int      @default(2026)
   updatedAt     DateTime @updatedAt
 }

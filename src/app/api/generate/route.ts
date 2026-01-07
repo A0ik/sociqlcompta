@@ -1,312 +1,162 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
-import { getNextFactureNumber, calculerMontants } from '@/lib/facture-utils';
+import { getNextDocumentNumber, calculerMontants } from '@/lib/utils';
 import { creerLienPaiement } from '@/lib/stripe';
 
-interface LigneFacture {
+interface Ligne {
   description: string;
   quantite: number;
   prixUnitaire: number;
   montant: number;
 }
 
-// Transcrire l'audio avec Groq (gratuit et fiable) ou OpenAI
-async function transcrireAudio(audioBlob: Blob): Promise<{ text: string; success: boolean; error?: string }> {
-  // Essayer d'abord avec Groq (gratuit)
+// Transcription avec Groq (gratuit) ou fallback
+async function transcrire(audio: Blob): Promise<{ text: string; ok: boolean; error?: string }> {
   const groqKey = process.env.GROQ_API_KEY;
-  const openaiKey = process.env.OPENAI_API_KEY;
-  const openrouterKey = process.env.OPENROUTER_API_KEY;
-
-  // Option 1: Groq (recommandé - gratuit)
+  
   if (groqKey) {
     try {
-      const formData = new FormData();
-      formData.append('file', audioBlob, 'audio.webm');
-      formData.append('model', 'whisper-large-v3');
-      formData.append('language', 'fr');
+      const form = new FormData();
+      form.append('file', audio, 'audio.webm');
+      form.append('model', 'whisper-large-v3');
+      form.append('language', 'fr');
 
-      const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${groqKey}`,
-        },
-        body: formData,
+        headers: { 'Authorization': `Bearer ${groqKey}` },
+        body: form,
       });
 
-      if (response.ok) {
-        const data = await response.json();
-        return { text: data.text || '', success: true };
+      if (res.ok) {
+        const data = await res.json();
+        return { text: data.text || '', ok: true };
       }
+      const err = await res.text();
+      return { text: '', ok: false, error: err };
     } catch (e) {
-      console.error('Groq error:', e);
+      return { text: '', ok: false, error: String(e) };
     }
   }
 
-  // Option 2: OpenAI directement
-  if (openaiKey) {
-    try {
-      const formData = new FormData();
-      formData.append('file', audioBlob, 'audio.webm');
-      formData.append('model', 'whisper-1');
-      formData.append('language', 'fr');
-
-      const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${openaiKey}`,
-        },
-        body: formData,
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        return { text: data.text || '', success: true };
-      }
-    } catch (e) {
-      console.error('OpenAI error:', e);
-    }
-  }
-
-  // Option 3: OpenRouter (peut ne pas supporter audio)
-  if (openrouterKey) {
-    try {
-      const formData = new FormData();
-      formData.append('file', audioBlob, 'audio.webm');
-      formData.append('model', 'openai/whisper-large-v3');
-      formData.append('language', 'fr');
-
-      const response = await fetch('https://openrouter.ai/api/v1/audio/transcriptions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${openrouterKey}`,
-        },
-        body: formData,
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        return { text: data.text || '', success: true };
-      } else {
-        const errorText = await response.text();
-        return { text: '', success: false, error: `OpenRouter: ${errorText}` };
-      }
-    } catch (e) {
-      console.error('OpenRouter error:', e);
-    }
-  }
-
-  return { 
-    text: '', 
-    success: false, 
-    error: 'Aucune API de transcription configurée. Ajoutez GROQ_API_KEY (gratuit) ou OPENAI_API_KEY.' 
-  };
+  return { text: '', ok: false, error: 'GROQ_API_KEY non configurée. Créez un compte gratuit sur console.groq.com' };
 }
 
-// Extraire les infos avec GPT via OpenRouter
-async function extraireInfos(transcription: string): Promise<{
-  numDossier: string;
-  lignes: LigneFacture[];
+// Extraction avec OpenRouter
+async function extraire(texte: string): Promise<{
+  lignes: Ligne[];
   reduction: number;
-  sousTotal: number;
-  montantHT: number;
-  success: boolean;
+  ok: boolean;
   error?: string;
 }> {
-  const apiKey = process.env.OPENROUTER_API_KEY;
+  const key = process.env.OPENROUTER_API_KEY;
+  if (!key) return { lignes: [], reduction: 0, ok: false, error: 'OPENROUTER_API_KEY manquante' };
 
-  if (!apiKey) {
-    return {
-      numDossier: '',
-      lignes: [],
-      reduction: 0,
-      sousTotal: 0,
-      montantHT: 0,
-      success: false,
-      error: 'OPENROUTER_API_KEY non configurée',
-    };
-  }
+  const prompt = `Extrais les lignes de facturation du texte suivant. 
+Réponds UNIQUEMENT en JSON: {"lignes":[{"description":"string","quantite":number,"prixUnitaire":number,"montant":number}],"reduction":number}
 
-  const systemPrompt = `Tu es un assistant pour un cabinet comptable français. Extrais les informations de facturation.
-
-EXEMPLES:
-"Facture dossier AM0028, 5 fiches de paie à 30 euros" →
-{"numDossier":"AM0028","lignes":[{"description":"Fiche de paie","quantite":5,"prixUnitaire":30,"montant":150}],"reduction":0}
-
-"Dossier SPR, bilan 500€ et 3 bulletins 25€, remise 50€" →
-{"numDossier":"SPR","lignes":[{"description":"Bilan","quantite":1,"prixUnitaire":500,"montant":500},{"description":"Bulletin","quantite":3,"prixUnitaire":25,"montant":75}],"reduction":50}
-
-RÈGLES:
-- Si pas de quantité → quantite = 1
-- montant = quantite × prixUnitaire
-- reduction ≥ 0
-
-Réponds UNIQUEMENT en JSON valide:
-{"numDossier":"string","lignes":[{"description":"string","quantite":number,"prixUnitaire":number,"montant":number}],"reduction":number}`;
+Texte: "${texte}"`;
 
   try {
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${apiKey}`,
+        'Authorization': `Bearer ${key}`,
         'Content-Type': 'application/json',
-        'HTTP-Referer': process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000',
       },
       body: JSON.stringify({
         model: 'openai/gpt-4o-mini',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: transcription },
-        ],
+        messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
       }),
     });
 
-    if (!response.ok) {
-      const error = await response.text();
-      return { numDossier: '', lignes: [], reduction: 0, sousTotal: 0, montantHT: 0, success: false, error };
-    }
+    if (!res.ok) return { lignes: [], reduction: 0, ok: false, error: await res.text() };
 
-    const data = await response.json();
+    const data = await res.json();
     const content = data.choices?.[0]?.message?.content || '';
+    const match = content.match(/\{[\s\S]*\}/);
     
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      return { numDossier: '', lignes: [], reduction: 0, sousTotal: 0, montantHT: 0, success: false, error: 'Pas de JSON trouvé' };
-    }
+    if (!match) return { lignes: [], reduction: 0, ok: false, error: 'Pas de JSON' };
 
-    const parsed = JSON.parse(jsonMatch[0]);
-    const lignes: LigneFacture[] = (parsed.lignes || []).map((l: Record<string, unknown>) => ({
+    const parsed = JSON.parse(match[0]);
+    const lignes: Ligne[] = (parsed.lignes || []).map((l: Record<string, unknown>) => ({
       description: String(l.description || ''),
       quantite: Math.max(1, Number(l.quantite) || 1),
-      prixUnitaire: Math.max(0, Number(l.prixUnitaire) || 0),
-      montant: Math.max(0, Number(l.montant) || 0),
+      prixUnitaire: Number(l.prixUnitaire) || 0,
+      montant: Number(l.montant) || 0,
     }));
 
-    const sousTotal = lignes.reduce((sum, l) => sum + l.montant, 0);
-    const reduction = Math.max(0, Number(parsed.reduction) || 0);
-
-    return {
-      numDossier: String(parsed.numDossier || '').toUpperCase().trim(),
-      lignes,
-      reduction,
-      sousTotal,
-      montantHT: sousTotal - reduction,
-      success: true,
-    };
-  } catch (error) {
-    return {
-      numDossier: '',
-      lignes: [],
-      reduction: 0,
-      sousTotal: 0,
-      montantHT: 0,
-      success: false,
-      error: error instanceof Error ? error.message : 'Erreur extraction',
-    };
+    return { lignes, reduction: Number(parsed.reduction) || 0, ok: true };
+  } catch (e) {
+    return { lignes: [], reduction: 0, ok: false, error: String(e) };
   }
 }
 
-export async function POST(request: NextRequest) {
+export async function POST(req: NextRequest) {
   try {
-    const contentType = request.headers.get('content-type') || '';
+    const contentType = req.headers.get('content-type') || '';
 
     // Transcription audio
     if (contentType.includes('multipart/form-data')) {
-      const formData = await request.formData();
-      const audio = formData.get('audio') as Blob;
+      const form = await req.formData();
+      const audio = form.get('audio') as Blob;
+      if (!audio) return NextResponse.json({ error: 'Audio requis' }, { status: 400 });
 
-      if (!audio) {
-        return NextResponse.json({ error: 'Fichier audio requis' }, { status: 400 });
-      }
-
-      const result = await transcrireAudio(audio);
-      
-      return NextResponse.json({
-        success: result.success,
-        transcription: result.text,
-        error: result.error,
-      });
+      const result = await transcrire(audio);
+      return NextResponse.json({ success: result.ok, transcription: result.text, error: result.error });
     }
 
-    // Actions JSON
-    const body = await request.json();
+    const body = await req.json();
 
+    // Extraction depuis texte
     if (body.action === 'extract') {
-      const { transcription } = body;
-      if (!transcription) {
-        return NextResponse.json({ error: 'Transcription requise' }, { status: 400 });
-      }
-
-      const extraction = await extraireInfos(transcription);
-
-      let client = null;
-      if (extraction.success && extraction.numDossier) {
-        client = await prisma.client.findUnique({
-          where: { numDossier: extraction.numDossier },
-        });
-      }
-
-      return NextResponse.json({
-        success: extraction.success,
-        extraction,
-        clientTrouve: !!client,
-        client,
-        error: extraction.error,
-      });
+      const result = await extraire(body.texte || '');
+      return NextResponse.json({ success: result.ok, ...result });
     }
 
+    // Création document (facture ou avoir)
     if (body.action === 'create') {
-      const { numDossier, lignes, reduction = 0, genererStripe = true } = body;
+      const { type, clientId, lignes, reduction = 0, factureOrigineId } = body;
 
-      if (!numDossier || !lignes?.length) {
-        return NextResponse.json({ error: 'Données incomplètes' }, { status: 400 });
+      if (!clientId || !lignes?.length) {
+        return NextResponse.json({ error: 'Données manquantes' }, { status: 400 });
       }
 
-      const client = await prisma.client.findUnique({
-        where: { numDossier: numDossier.toUpperCase().trim() },
-      });
+      const client = await prisma.client.findUnique({ where: { id: clientId } });
+      if (!client) return NextResponse.json({ error: 'Client non trouvé' }, { status: 404 });
 
-      if (!client) {
-        return NextResponse.json({ error: `Dossier ${numDossier} non trouvé` }, { status: 404 });
-      }
+      const sousTotal = lignes.reduce((s: number, l: Ligne) => s + l.montant, 0);
+      const montants = calculerMontants(sousTotal, reduction);
+      const { numeroSequentiel, prefixe, numeroComplet } = await getNextDocumentNumber(type);
 
-      const sousTotal = lignes.reduce((sum: number, l: LigneFacture) => sum + l.montant, 0);
-      const montants = calculerMontants(sousTotal, reduction, 20);
-      const { numeroSequentiel, prefixe, numeroComplet } = await getNextFactureNumber();
-
-      let stripePaymentLink: string | null = null;
-      let stripePaymentId: string | null = null;
-
-      if (genererStripe && process.env.STRIPE_SECRET_KEY) {
-        const desc = lignes.map((l: LigneFacture) => `${l.quantite}x ${l.description}`).join(', ');
-        const stripeResult = await creerLienPaiement({
+      let stripeUrl = null, stripeId = null;
+      if (type === 'FACTURE' && process.env.STRIPE_SECRET_KEY) {
+        const desc = lignes.map((l: Ligne) => `${l.quantite}x ${l.description}`).join(', ');
+        const stripe = await creerLienPaiement({
           montantTTC: montants.montantTTC,
-          numeroFacture: numeroComplet,
+          numeroDocument: numeroComplet,
           raisonSociale: client.raisonSociale,
-          prestation: desc,
+          description: desc,
         });
-        if (stripeResult.success) {
-          stripePaymentLink = stripeResult.url || null;
-          stripePaymentId = stripeResult.paymentLinkId || null;
+        if (stripe.success) {
+          stripeUrl = stripe.url;
+          stripeId = stripe.paymentLinkId;
         }
       }
 
-      const facture = await prisma.facture.create({
+      const doc = await prisma.document.create({
         data: {
+          type,
           numeroSequentiel,
           prefixe,
           numeroComplet,
-          sousTotal: montants.sousTotal,
-          reduction: montants.reduction,
-          montantHT: montants.montantHT,
-          tauxTVA: montants.tauxTVA,
-          montantTVA: montants.montantTVA,
-          montantTTC: montants.montantTTC,
-          stripePaymentLink,
-          stripePaymentId,
+          factureOrigineId: type === 'AVOIR' ? factureOrigineId : null,
+          ...montants,
+          stripePaymentLink: stripeUrl,
+          stripePaymentId: stripeId,
           clientId: client.id,
           lignes: {
-            create: lignes.map((l: LigneFacture) => ({
+            create: lignes.map((l: Ligne) => ({
               description: l.description,
               quantite: l.quantite,
               prixUnitaire: l.prixUnitaire,
@@ -317,12 +167,12 @@ export async function POST(request: NextRequest) {
         include: { client: true, lignes: true },
       });
 
-      return NextResponse.json({ success: true, facture });
+      return NextResponse.json({ success: true, document: doc });
     }
 
-    return NextResponse.json({ error: 'Action non reconnue' }, { status: 400 });
-  } catch (error) {
-    console.error('Erreur:', error);
-    return NextResponse.json({ error: error instanceof Error ? error.message : 'Erreur serveur' }, { status: 500 });
+    return NextResponse.json({ error: 'Action inconnue' }, { status: 400 });
+  } catch (e) {
+    console.error(e);
+    return NextResponse.json({ error: String(e) }, { status: 500 });
   }
 }

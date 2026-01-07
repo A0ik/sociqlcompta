@@ -1,85 +1,61 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 
-export async function GET(request: NextRequest) {
-  try {
-    const { searchParams } = new URL(request.url);
-    const search = searchParams.get('search') || '';
-    const limit = parseInt(searchParams.get('limit') || '50');
+export async function GET(req: NextRequest) {
+  const { searchParams } = new URL(req.url);
+  const search = searchParams.get('search') || '';
 
-    let clients;
+  const clients = await prisma.client.findMany({
+    where: search ? {
+      OR: [
+        { numDossier: { contains: search, mode: 'insensitive' } },
+        { raisonSociale: { contains: search, mode: 'insensitive' } },
+      ],
+    } : undefined,
+    orderBy: { raisonSociale: 'asc' },
+    take: 50,
+  });
 
-    if (search) {
-      // Recherche par numéro de dossier ou raison sociale
-      clients = await prisma.client.findMany({
-        where: {
-          OR: [
-            { numDossier: { contains: search } },
-            { raisonSociale: { contains: search } },
-          ],
-        },
-        orderBy: { raisonSociale: 'asc' },
-        take: limit,
-      });
-    } else {
-      clients = await prisma.client.findMany({
-        orderBy: { raisonSociale: 'asc' },
-        take: limit,
-      });
-    }
-
-    return NextResponse.json({
-      success: true,
-      clients,
-      total: await prisma.client.count(),
-    });
-  } catch (error) {
-    console.error('Erreur récupération dossiers:', error);
-    return NextResponse.json(
-      { error: 'Erreur lors de la récupération des dossiers' },
-      { status: 500 }
-    );
-  }
+  return NextResponse.json({ clients, total: await prisma.client.count() });
 }
 
-// Récupérer un dossier spécifique par numéro
-export async function POST(request: NextRequest) {
-  try {
-    const { numDossier } = await request.json();
+export async function POST(req: NextRequest) {
+  const body = await req.json();
 
-    if (!numDossier) {
-      return NextResponse.json(
-        { error: 'Numéro de dossier requis' },
-        { status: 400 }
-      );
+  // Créer un nouveau client manuellement
+  if (body.action === 'create') {
+    const { numDossier, raisonSociale, adresse, siret } = body;
+
+    if (!numDossier || !raisonSociale) {
+      return NextResponse.json({ error: 'Numéro et raison sociale requis' }, { status: 400 });
     }
 
-    const client = await prisma.client.findUnique({
-      where: { numDossier: numDossier.toUpperCase().trim() },
-      include: {
-        factures: {
-          orderBy: { createdAt: 'desc' },
-          take: 10,
-        },
-      },
-    });
-
-    if (!client) {
-      return NextResponse.json(
-        { error: 'Dossier non trouvé', numDossier },
-        { status: 404 }
-      );
+    const existing = await prisma.client.findUnique({ where: { numDossier } });
+    if (existing) {
+      return NextResponse.json({ error: 'Ce numéro existe déjà' }, { status: 409 });
     }
 
-    return NextResponse.json({
-      success: true,
-      client,
+    const client = await prisma.client.create({
+      data: { numDossier, raisonSociale, adresse, siret },
     });
-  } catch (error) {
-    console.error('Erreur récupération dossier:', error);
-    return NextResponse.json(
-      { error: 'Erreur lors de la récupération du dossier' },
-      { status: 500 }
-    );
+
+    return NextResponse.json({ success: true, client });
   }
+
+  // Récupérer un client par numDossier
+  const { numDossier } = body;
+  if (!numDossier) {
+    return NextResponse.json({ error: 'numDossier requis' }, { status: 400 });
+  }
+
+  const client = await prisma.client.findUnique({
+    where: { numDossier: numDossier.toUpperCase() },
+    include: { documents: { orderBy: { createdAt: 'desc' }, take: 10, include: { lignes: true } } },
+  });
+
+  if (!client) {
+    return NextResponse.json({ error: 'Non trouvé' }, { status: 404 });
+  }
+
+  return NextResponse.json({ client });
 }
